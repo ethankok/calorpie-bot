@@ -1,4 +1,4 @@
-# calorie-bot
+# Calorpie bot
 
 A private Telegram bot for counting calories. You send it a photo of your food, or type or say what you ate. It estimates the calories with Gemini, replies with a meal card, and keeps a daily total against your goal.
 

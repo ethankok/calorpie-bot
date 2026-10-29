@@ -838,7 +838,7 @@ async def _report_failure(ctx: ContextTypes.DEFAULT_TYPE, exc: Exception) -> Non
         try:
             await ctx.bot.send_message(
                 owner,
-                f"⚠️ calorie-bot: 3 Gemini failures in a row. Last error ({getattr(exc, 'reason', '?')}): "
+                f"⚠️ Calorpie: 3 Gemini failures in a row. Last error ({getattr(exc, 'reason', '?')}): "
                 f"{escape(render.clip(str(exc), 300))}",
             )
         except Exception:
