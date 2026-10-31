@@ -57,6 +57,8 @@ STATE_TTL_S = 600  # a pending question (code, goal) expires so stray later mess
 DUPLICATE_WINDOW = timedelta(minutes=30)
 LATE_REPLY_S = 180  # a slower reply starts with an apology
 REMINDER_SETTLE_S = 45  # a late recap waits this long so the Telegram backlog is logged first
+IDLE_PAUSE = timedelta(days=3)  # this long without a logged meal pauses the recap instead of nagging every night
+WEEKLY_BACKUP_DAY = 6  # Sunday: the nightly backup is also sent to the owner, so a copy lives off the VM
 AI_DEADLINE_S = 90  # give up on one Gemini call, retries included, after this long
 RECENT_MEAL_WINDOW = timedelta(minutes=15)  # an unreplied text this soon after a meal may be a correction
 GOAL_MIN, GOAL_MAX, GOAL_LOW_WARN = 1000, 4000, 1200  # accepted goal range; below GOAL_LOW_WARN adds a health note
@@ -102,7 +104,9 @@ class PerChatUpdateProcessor(BaseUpdateProcessor):
             while (album := _pending_album(self.albums, chat.id, update)) is not None:
                 await album["done"].wait()
             async with self.locks[chat.id]:
+                started = _time.monotonic()
                 await coroutine
+                log.info("user=%s %s (%.1fs)", chat.id, _update_kind(update), _time.monotonic() - started)
         finally:
             async with q.cond:
                 if q.serving == ticket:
@@ -132,6 +136,21 @@ class _ChatQueue:
         self.serving = 0
         self.skipped: set[int] = set()
         self.cond = asyncio.Condition()
+
+
+def _update_kind(update) -> str:
+    """A label for the activity log that never includes what they wrote: 'photo', 'text reply', '/week', 'tap p'."""
+    if update.callback_query:
+        return "tap " + (update.callback_query.data or "").partition(":")[0]
+    if update.edited_message:
+        return "edit"
+    msg = update.message
+    if msg is None:
+        return "other"
+    if msg.text and msg.text.startswith("/"):
+        return msg.text.split()[0].split("@")[0]  # never the argument: /start may carry the access code
+    kind = "photo" if msg.photo or msg.document else "voice" if msg.voice or msg.audio else "text" if msg.text else "other"
+    return kind + (" album" if msg.media_group_id else "") + (" reply" if msg.reply_to_message else "")
 
 
 def _pending_album(albums: dict[str, dict], chat_id: int, update) -> dict | None:
@@ -433,6 +452,8 @@ async def cmd_reminder(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _set_reminder(msg: Message, ctx: ContextTypes.DEFAULT_TYPE, user: User, hhmm: str | None) -> None:
     _db(ctx).set_user_field(user.user_id, "reminder_time", hhmm)
+    if hhmm:
+        ctx.user_data["recap_since"] = datetime.now(UTC)  # setting it counts as activity, so it isn't paused that night
     user = _db(ctx).get_user(user.user_id)
     schedule_reminder(ctx.application, user)
     if hhmm:
@@ -460,6 +481,7 @@ def schedule_reminder(app: Application, user: User) -> None:
         name=name,
         data=user.user_id,
         chat_id=user.chat_id,
+        user_id=user.user_id,  # gives the job their user_data (recap_since / recap_paused)
         # If the bot was stalled at reminder time, still send it once it recovers (within 1h) instead of skipping.
         job_kwargs={"misfire_grace_time": 3600, "coalesce": True},
     )
@@ -486,7 +508,27 @@ async def send_reminder(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     async with ctx.bot_data["chat_locks"][user.chat_id]:
         # A late recap outside 07:00-23:00 arrives without a notification sound.
         quiet = late and not (time(7) <= datetime.now(user.zone).time() < time(23))
-        await _send_recap(ctx, db.get_user(user.user_id) or user, quiet=quiet)
+        user = db.get_user(user.user_id) or user
+        idle = datetime.now(UTC) - max(db.last_activity(user.user_id), ctx.user_data.get("recap_since", _EPOCH))
+        if idle >= IDLE_PAUSE:
+            # Skipped, not turned off: their setting stays, so it comes back by itself once they log again.
+            # Losing this flag (e.g. a reset state file) only costs one repeat of the notice.
+            if not ctx.user_data.get("recap_paused"):
+                await ctx.bot.send_message(
+                    user.chat_id,
+                    "🌙 No meals logged for a few days, so I'll pause these evening recaps. "
+                    "They'll start again on their own the next time you log something.",
+                    disable_notification=quiet,
+                )
+                ctx.user_data["recap_paused"] = True
+                log.info("user=%s recap paused (no meals for %s days)", user.user_id, IDLE_PAUSE.days)
+            return
+        ctx.user_data.pop("recap_paused", None)
+        await _send_recap(ctx, user, quiet=quiet)
+        log.info("user=%s recap sent", user.user_id)
+
+
+_EPOCH = datetime.fromtimestamp(0, UTC)
 
 
 async def _send_recap(ctx: ContextTypes.DEFAULT_TYPE, user: User, quiet: bool) -> None:
@@ -665,12 +707,14 @@ async def log_meal(
                 )]])
             note = "\n\n" + NOT_LOGGED_NOTE if keyboard else ""
             await _safe_edit(placeholder, escape(render.clip(reply, 1500)) + note, keyboard)
+            log.info("user=%s answered a question%s", user.user_id, " (offered Log it)" if keyboard else "")
             return
         fallback = {
             "not_food": "🤔 I don't see any food or drink in that. Send a photo of your meal, or describe it in words.",
             "unclear": "🤔 I can't tell what that is. Could you describe it in a few words?",
         }.get(est.kind, "🤔 I'm not sure what to log. Describe the food, e.g. “bowl of laksa”.")
         await _safe_edit(placeholder, escape(render.clip(est.note, 500)) if est.note else fallback)
+        log.info("user=%s nothing logged (%s)", user.user_id, est.kind)
         return
 
     await _save_meal(ctx, user, est, placeholder, manual_retry=manual_retry, replaces=replaces, **save)
@@ -724,6 +768,7 @@ async def _save_meal(
         meal_type=replaces.meal_type if replaces else None if est.meal_type_hint == "none" else est.meal_type_hint,
         dedupe_key=dedupe_key,
     )
+    log.info("user=%s logged meal %s: %s kcal, %d items from %s", user.user_id, meal_id, round(est.kcal), len(est.items), source)
     if replaces:
         db.update_meal(replaces.id, deleted=1)
         if replaces.bot_message_id:
@@ -827,6 +872,8 @@ def _failure_text(exc: Exception) -> str:
         return "😓 The AI service is busy or its limit was reached. Try again in a little while."
     if reason == "rejected":
         return "😓 I couldn't process that one. Try another photo, or describe the food in words."
+    if reason == "empty":
+        return "😓 Sorry, I couldn't make sense of that one just now. Tap Try again, or describe it in words."
     return "😓 Sorry, I couldn't analyse that just now (connection hiccup)."
 
 
@@ -1151,6 +1198,7 @@ async def refine_meal(
         **({"meal_type": est.meal_type_hint} if est.meal_type_hint != "none" else {}),
         **_moved_to_yesterday(meal, est, user),
     )
+    log.info("user=%s corrected meal %s: %s -> %s kcal", user.user_id, meal.id, round(old_kcal), round(est.kcal))
     remembered = _remember(db, user, est.remember) if est.remember else ""
     # Retire the old card so only the newest version has buttons; replies to it still reach this meal.
     if meal.bot_message_id:
@@ -1574,9 +1622,18 @@ async def _post_init(app: Application) -> None:
 
 
 async def _backup(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    db = _db(ctx)
+    db, settings = _db(ctx), _settings(ctx)
     path = db.backup(db.path.parent / "backups")
     log.info("Backed up database to %s", path)
+    if settings.owner_chat_id and datetime.now(ZoneInfo(settings.default_tz)).weekday() == WEEKLY_BACKUP_DAY:
+        try:
+            await ctx.bot.send_document(
+                settings.owner_chat_id, path.read_bytes(), filename=path.name,
+                caption="🗄 Weekly Calorpie backup (SQLite)", disable_notification=True,
+            )
+            log.info("Sent weekly backup to the owner")
+        except TelegramError:
+            log.exception("could not send the weekly backup")  # the copy on the VM is still saved
 
 
 def _usable_state_file(path: pathlib.Path) -> pathlib.Path:

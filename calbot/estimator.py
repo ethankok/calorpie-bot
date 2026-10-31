@@ -10,7 +10,7 @@ from typing import Literal
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,10 @@ class FoodItem(BaseModel):
 
 
 class Estimate(BaseModel):
+    # Required in the schema sent to Gemini, though it defaults to [] in Python: left optional, the model
+    # skipped it in 5 of 31 test photos and returned "food" with nothing in it.
+    model_config = ConfigDict(json_schema_extra=lambda schema: schema["required"].append("items"))
+
     kind: Literal["food", "not_food", "question", "unclear", "correction", "new_meal"] = Field(
         description=(
             "food: the input describes or shows something eaten/drunk to log. "
@@ -200,7 +204,7 @@ class EstimatorError(RuntimeError):
     """Raised when Gemini cannot produce an estimate after retries.
 
     reason: 'quota' (rate limit / budget exhausted), 'rejected' (request refused, e.g. bad image or key),
-    or 'network' (timeouts, 5xx, unusable output).
+    'empty' (answers came back but held no usable estimate), or 'network' (timeouts, 5xx).
     """
 
     def __init__(self, message: str, reason: str = "network"):
@@ -324,7 +328,7 @@ class Estimator:
             if est is not None:
                 return est
             log.warning("Empty estimate (attempt %d, finish=%s)", attempt + 1, _finish_reason(resp))
-        raise EstimatorError("Gemini returned no usable estimate")
+        raise EstimatorError("Gemini returned no usable estimate", "empty")
 
 
 _ESTIMATE_CORE = {"kind", "title", "items", "note"}

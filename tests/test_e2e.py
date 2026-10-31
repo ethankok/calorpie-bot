@@ -1,7 +1,7 @@
 """End-to-end handler tests: real handlers + DB, fake Telegram, stubbed Gemini."""
 import asyncio
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -324,6 +324,102 @@ async def test_reminder_message(env):
     await chat.text("a")
     await job.run(app)
     assert "Your day so far" in tg.last().text
+
+
+def _go_idle(app, days=4):
+    """Pretend they joined, and last turned the recap on, `days` ago and haven't logged since."""
+    db = app.bot_data["db"]
+    db.conn.execute("UPDATE users SET created_at = ? WHERE user_id = 42",
+                    ((datetime.now(ZoneInfo("UTC")) - timedelta(days=days)).isoformat(timespec="seconds"),))
+    db.conn.commit()
+    app.user_data[42].pop("recap_since", None)
+
+
+async def test_recap_pauses_for_idle_user_and_resumes_on_next_meal(env):
+    app, tg, chat, stub = env
+    await onboard(chat, tg)
+    await chat.text("/reminder 21:00")
+    _go_idle(app)
+    job = app.job_queue.get_jobs_by_name("reminder:42")[0]
+    await job.run(app)
+    assert "pause these evening recaps" in tg.last().text
+    calls = len(tg.calls)
+    await job.run(app)  # still idle the next night: says nothing at all
+    assert len(tg.calls) == calls
+    assert app.bot_data["db"].get_user(42).reminder_time == "21:00"  # their setting is never touched
+
+    await chat.text("chicken rice")
+    assert "Chicken rice" in tg.last().text
+    await job.run(app)
+    assert "Your day so far" in tg.last().text
+    assert "recap_paused" not in app.user_data[42]
+
+
+async def test_recap_not_paused_for_active_or_just_reenabled_user(env):
+    app, tg, chat, stub = env
+    await onboard(chat, tg)
+    await chat.text("/reminder 21:00")
+    _go_idle(app)
+    await chat.text("/reminder 21:00")  # turned it on again themselves: give it another few days
+    await app.job_queue.get_jobs_by_name("reminder:42")[0].run(app)
+    assert "nothing logged today" in tg.last().text
+    _go_idle(app)
+    await chat.text("2 eggs")  # logged today: never paused
+    await app.job_queue.get_jobs_by_name("reminder:42")[0].run(app)
+    assert "Your day so far" in tg.last().text
+
+
+async def test_weekly_backup_goes_to_owner(env, monkeypatch):
+    from calbot import bot as bot_mod
+
+    app, tg, chat, stub = env
+    await onboard(chat, tg)
+    app.bot_data["settings"] = replace(app.bot_data["settings"], owner_chat_id=42)
+    today = datetime.now(ZoneInfo("Asia/Singapore")).weekday()
+    monkeypatch.setattr(bot_mod, "WEEKLY_BACKUP_DAY", (today + 1) % 7)
+    job = app.job_queue.run_once(bot_mod._backup, 3600)
+    await job.run(app)
+    assert not [c for c in tg.calls if c[0] == "sendDocument"]  # not the backup day: stays on the VM only
+    monkeypatch.setattr(bot_mod, "WEEKLY_BACKUP_DAY", today)
+    await job.run(app)
+    sent = [p for m, p in tg.calls if m == "sendDocument"]
+    assert len(sent) == 1 and int(sent[0]["chat_id"]) == 42 and sent[0]["disable_notification"]
+    assert "backup" in tg.last().text.lower() and tg.last().document
+    job.schedule_removal()
+
+
+async def test_activity_log_has_no_message_content(env, caplog):
+    app, tg, chat, stub = env
+    caplog.set_level("INFO", logger="calbot.bot")
+
+    def msg(text):
+        m = {"message_id": next(tg._update_ids), "date": int(datetime.now().timestamp()), "text": text,
+             "chat": {"id": 42, "type": "private"}, "from": {"id": 42, "is_bot": False, "first_name": "Test"}}
+        if text.startswith("/"):
+            m["entities"] = [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
+        return {"message": m}
+
+    await _backlog(app, tg, chat, [msg("/start secretcode")])  # through the update processor, as in production
+    await onboard(chat, tg)
+    await _backlog(app, tg, chat, [msg("2 kaya toast and kopi")])
+    lines = [r.getMessage() for r in caplog.records if r.name == "calbot.bot"]
+    assert any(ln.startswith("user=42 /start (") for ln in lines)
+    assert any(ln.startswith("user=42 text (") for ln in lines)
+    assert any("logged meal" in ln and "from text" in ln for ln in lines)
+    assert not [ln for ln in lines if "secretcode" in ln or "kaya" in ln or "pandan" in ln]
+
+
+async def test_empty_estimate_wording(env):
+    app, tg, chat, stub = env
+    await onboard(chat, tg)
+
+    async def empty(**_kw):
+        raise EstimatorError("Gemini returned no usable estimate", reason="empty")
+
+    stub.estimate = empty
+    await chat.text("2 eggs")
+    assert "make sense of" in tg.last().text and "connection" not in tg.last().text
+    assert tg.last().button("Try again")
 
 
 async def test_week_and_export(env):

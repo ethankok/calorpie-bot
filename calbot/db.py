@@ -162,6 +162,15 @@ class DB:
         self.conn.execute(f"UPDATE users SET {field} = ? WHERE user_id = ?", (value, user_id))
         self.conn.commit()
 
+    def last_activity(self, user_id: int) -> datetime:
+        """When they last logged a meal (deleted ones count), or joined if they never have."""
+        row = self.conn.execute(
+            """SELECT MAX(t) t FROM (SELECT created_at t FROM users WHERE user_id = ?
+                                     UNION ALL SELECT MAX(created_at) FROM meals WHERE user_id = ?)""",
+            (user_id, user_id),
+        ).fetchone()
+        return datetime.fromisoformat(row["t"]).astimezone(UTC)
+
     def users_with_reminders(self) -> list[User]:
         rows = self.conn.execute(
             "SELECT * FROM users WHERE authorized = 1 AND reminder_time IS NOT NULL"

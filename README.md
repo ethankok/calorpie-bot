@@ -138,7 +138,9 @@ Photos, text and voice notes are sent to Google's Gemini API to be estimated. Me
 - Each user gets 80 Gemini calls a day (`CALBOT_DAILY_AI_CAP`), and all users together get twice that. Corrections count.
 - The same photo sent again within 30 minutes isn't counted twice. A similar meal within 10 minutes gets a "looks like a repeat" note.
 - If Gemini fails 3 times in a row, the bot messages the owner (`CALBOT_OWNER_ID`). This catches a dead key or a spent budget.
-- Every night at 04:30 it saves a dated copy of the database in `backups/`, next to the database, and keeps the newest 14. These copies are on the same disk.
+- Every night at 04:30 it saves a dated copy of the database in `backups/`, next to the database, and keeps the newest 14. These copies are on the same disk, so every Sunday's copy is also sent to the owner on Telegram.
+- After 3 days with no meal logged, the evening recap pauses with a one-line note instead of nagging every night. It turns back on by itself the next time that person logs a meal.
+- Each update gets one log line: the user ID, the kind of update (for example `photo`, `/today` or `tap del`) and how long it took. The log never includes what the user wrote. Log times are in `CALBOT_TZ`.
 
 ## Running it
 
@@ -162,7 +164,7 @@ These are optional:
 | `CALBOT_DB` | `data/calbot.db` |
 | `GEMINI_MODEL` | `gemini-3.8-flash` |
 | `CALBOT_DAILY_AI_CAP` | `80` |
-| `CALBOT_OWNER_ID` | none (set it to your Telegram user ID to get failure alerts) |
+| `CALBOT_OWNER_ID` | none (set it to your Telegram user ID to get failure alerts and the weekly backup) |
 
 ### Run and test
 
