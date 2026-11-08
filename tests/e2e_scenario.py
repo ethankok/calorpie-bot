@@ -70,7 +70,6 @@ async def main():
     undone = next(m for m in reversed(tg.bot_messages()) if any("Restore" in b["text"] for b in m.buttons()))
     await step("restore", chat.press(undone.message_id, "Restore"))
     await step("/week", chat.text("/week"))
-    await step("/notes", chat.text("/notes"))
     await step("/export", chat.text("/export"))
     await step("sticker", chat.sticker())
     await step("unknown command", chat.text("/foo"))

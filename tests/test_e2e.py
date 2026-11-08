@@ -26,8 +26,8 @@ class StubEstimator:
         self.always_correction = False
         self.refine_new_meal = False
 
-    async def estimate(self, *, text="", media=None, notes="", recent_meal=""):
-        self.calls.append(("estimate", text, [m.mime_type for m in media or []], notes))
+    async def estimate(self, *, text="", media=None, recent_meal=""):
+        self.calls.append(("estimate", text, [m.mime_type for m in media or []]))
         self.last_recent = recent_meal
         if self.fail_next:
             self.fail_next -= 1
@@ -46,11 +46,9 @@ class StubEstimator:
             return Estimate(kind="not_food", title="", note="")
         if "yesterday" in text:
             return food("Yesterday's soup", 300, yesterday=True)
-        if "always" in text:
-            return food("Rice", 400, remember="Usually orders less rice")
         return food("Album meal" if len(media or []) > 1 else "Chicken rice", 600 * max(1, len(media or [])))
 
-    async def refine(self, previous, correction, media=None, notes="", original_text=""):
+    async def refine(self, previous, correction, media=None, original_text=""):
         self.calls.append(("refine", correction, len(media or [])))
         if self.delay:
             await asyncio.sleep(self.delay)
@@ -281,19 +279,6 @@ async def test_retry_after_failure(env):
     assert "couldn't analyse" in tg.last().text
     await chat.press(tg.last().message_id, "Try again")
     assert "Chicken rice" in tg.last().text
-
-
-async def test_habit_memory_and_notes(env):
-    app, tg, chat, stub = env
-    await onboard(chat, tg)
-    await chat.text("I always ask for less rice")
-    await chat.text("/notes")
-    assert "Usually orders less rice" in tg.last().text
-    await chat.text("x")
-    assert stub.calls[-1][3].endswith("Usually orders less rice")
-    await chat.text("/notes clear")
-    await chat.text("/notes")
-    assert "haven't learned" in tg.last().text
 
 
 async def test_goal_and_reminder_commands(env):

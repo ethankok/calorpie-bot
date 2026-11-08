@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS users (
     goal_kcal     INTEGER,
     tz            TEXT NOT NULL DEFAULT 'Asia/Singapore',
     reminder_time TEXT,              -- 'HH:MM' local, NULL = off
-    notes         TEXT NOT NULL DEFAULT '',  -- learned habits fed to every estimate
     code_attempts INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL
 );
@@ -79,7 +78,6 @@ class User:
     goal_kcal: int | None
     tz: str
     reminder_time: str | None
-    notes: str
     code_attempts: int = 0
 
     @property
@@ -157,7 +155,7 @@ class DB:
         return self.get_user(user_id)  # type: ignore[return-value]
 
     def set_user_field(self, user_id: int, field: str, value) -> None:
-        if field not in {"authorized", "goal_kcal", "tz", "reminder_time", "notes", "code_attempts"}:
+        if field not in {"authorized", "goal_kcal", "tz", "reminder_time", "code_attempts"}:
             raise ValueError(field)
         self.conn.execute(f"UPDATE users SET {field} = ? WHERE user_id = ?", (value, user_id))
         self.conn.commit()
@@ -351,7 +349,6 @@ def _user(row: sqlite3.Row) -> User:
         goal_kcal=row["goal_kcal"],
         tz=row["tz"],
         reminder_time=row["reminder_time"],
-        notes=row["notes"],
         code_attempts=row["code_attempts"],
     )
 

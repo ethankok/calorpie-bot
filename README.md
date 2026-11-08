@@ -50,8 +50,6 @@ A caption adds detail, such as "shared with 2". The bot guesses the meal type fr
 
 **Asking questions.** "How many calories in a curry puff?" gets an answer and a "➕ Log it" button. Nothing is logged unless you tap it. The bot can also answer questions about your log, such as "what can I eat with 400 kcal left?"
 
-**Habits.** Saying something like "I always ask for less rice" saves it as a note, and every later estimate uses it.
-
 **Commands:**
 
 | Command | What it does |
@@ -61,7 +59,6 @@ A caption adds detail, such as "shared with 2". The bot guesses the meal type fr
 | `/undo` | Delete the last meal |
 | `/goal` | Change the daily goal |
 | `/reminder` | Set or turn off the evening recap |
-| `/notes` | Show or clear saved habits |
 | `/export` | Download all meals as a CSV file |
 | `/cancel` | Stop whatever the bot is waiting for |
 | `/help` | Show how to use the bot |

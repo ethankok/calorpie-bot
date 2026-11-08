@@ -54,7 +54,6 @@ def meal_card(
     today_kcal: float,
     *,
     logged_for: date | None = None,
-    remembered: str = "",
 ) -> str:
     p = meal.portion
     lines = [
@@ -75,8 +74,6 @@ def meal_card(
         lines.append(f"• + {len(est.items) - 8} more — {fmt_kcal(rest)}")
     if est.note:
         lines += ["", f"💡 <i>{escape(clip(est.note, 300))}</i>"]
-    if remembered:
-        lines += ["", f"🧠 I'll remember: <i>{escape(clip(remembered, 150))}</i> (see /notes)"]
     lines.append("")
     if logged_for and logged_for != user.today():
         lines.append(f"📅 Logged for {logged_for:%a %d %b}")
@@ -212,7 +209,6 @@ def help_text() -> str:
         "/goal – set your daily calorie goal\n"
         "/reminder – evening recap on/off\n"
         "/undo – delete the last meal\n"
-        "/notes – what I've learned about your habits\n"
         "/export – download everything as a CSV\n"
         "/cancel – stop whatever I was asking you\n\n"
         "You can also ask me things like “what should I eat for dinner with 500 kcal left?”\n\n"

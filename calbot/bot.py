@@ -64,7 +64,6 @@ RECENT_MEAL_WINDOW = timedelta(minutes=15)  # an unreplied text this soon after 
 GOAL_MIN, GOAL_MAX, GOAL_LOW_WARN = 1000, 4000, 1200  # accepted goal range; below GOAL_LOW_WARN adds a health note
 ACK_RE = re.compile(r"(ok+|okay|k|thanks?|thank you|thx|ty|tq|cool|nice|great|noted|alright|yay|haha+|lol|👍|🙏|❤️|😊|🥰)[!. ]*", re.I)
 YES_RE = re.compile(r"(y|ya+|yes+|yep|yup|sure|use (it|that)|sounds good|go ahead|ok(ay)? (use|go with) (it|that))[!. ]*", re.I)
-MAX_NOTES_LINES = 12
 MAX_CODE_ATTEMPTS = 20
 GOAL_PRESETS = (1200, 1500, 1800, 2000)
 REMINDER_PRESETS = ("20:00", "21:00", "22:00")
@@ -583,16 +582,6 @@ def _image_mime(data: bytes) -> str:
     return "image/jpeg"
 
 
-def _remember(db: DB, user: User, fact: str) -> str:
-    """Save a habit; returns the fact if it was new (so the card can mention it), else ''."""
-    fact = render.clip(fact.strip().rstrip("."), 150)
-    if not fact or fact.lower() in user.notes.lower():
-        return ""
-    lines = [ln for ln in user.notes.splitlines() if ln.strip()] + [f"- {fact}"]
-    db.set_user_field(user.user_id, "notes", "\n".join(lines[-MAX_NOTES_LINES:]))
-    return fact
-
-
 async def log_meal(
     ctx: ContextTypes.DEFAULT_TYPE,
     user: User,
@@ -638,14 +627,14 @@ async def log_meal(
     try:
         media = [MediaPart(await _download(ctx, fid), mime) for fid, mime in file_ids]
         est = await asyncio.wait_for(
-            _est(ctx).estimate(text=text, media=media, notes=user.notes, recent_meal=_describe(recent) if recent else ""),
+            _est(ctx).estimate(text=text, media=media, recent_meal=_describe(recent) if recent else ""),
             AI_DEADLINE_S,  # retries inside the estimator must not freeze the chat for minutes
         )
         if est.kind == "new_meal" and not est.items and recent:
             # Shown the previous meal, the model only classified; ask again for the new food itself.
             db.bump_usage(user.user_id, user.today())
             est = await asyncio.wait_for(
-                _est(ctx).estimate(text=text, media=media, notes=user.notes), AI_DEADLINE_S
+                _est(ctx).estimate(text=text, media=media), AI_DEADLINE_S
             )
         if est.kind == "new_meal":
             est.kind = "food"
@@ -785,7 +774,6 @@ async def _save_meal(
     # The user's own message(s) too, so swiping-to-reply on their photo corrects this meal.
     for mid in own_message_ids:
         db.link_message(user.user_id, mid, meal_id)
-    remembered = _remember(db, user, est.remember) if est.remember else ""
     meal = db.get_meal(meal_id, user.user_id)
     late = not manual_retry and (datetime.now(UTC) - sent_at).total_seconds() > LATE_REPLY_S
     prefix = "⏳ <i>Sorry for the slow reply, I was offline. Logged at the time you sent it.</i>\n\n" if late else ""
@@ -796,7 +784,7 @@ async def _save_meal(
             f"🔁 <i>Looks like a repeat of <b>{escape(render.clip(twin.title, 50))}</b> "
             f"(sent {twin.eaten_at.astimezone(user.zone):%-I:%M%p}). If so, tap 🗑 Delete below.</i>\n\n"
         )
-    await _show_card(placeholder, lambda: prefix + _card(db, user, meal, est, remembered), meal)
+    await _show_card(placeholder, lambda: prefix + _card(db, user, meal, est), meal)
 
 
 def _prune_tokens(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -910,11 +898,9 @@ async def _show_card(placeholder: Message, build_text, meal: Meal) -> None:
             log.exception("fallback card failed too")
 
 
-def _card(db: DB, user: User, meal: Meal, est: Estimate | None = None, remembered: str = "") -> str:
+def _card(db: DB, user: User, meal: Meal, est: Estimate | None = None) -> str:
     est = est or Estimate.model_validate_json(meal.estimate_json)
-    return render.meal_card(
-        meal, est, user, _today_kcal(db, user), logged_for=meal.local_date, remembered=remembered
-    )
+    return render.meal_card(meal, est, user, _today_kcal(db, user), logged_for=meal.local_date)
 
 
 async def _answer(ctx: ContextTypes.DEFAULT_TYPE, user: User, question: str) -> str:
@@ -932,7 +918,6 @@ async def _answer(ctx: ContextTypes.DEFAULT_TYPE, user: User, question: str) -> 
             + (f" ({user.goal_kcal - eaten:.0f} left)" if user.goal_kcal else ""),
             "Today's meals: " + ("; ".join(f"{m.meal_type}: {m.title} {m.kcal:.0f} kcal" for m in meals) or "none"),
             f"7-day average on logged days: {sum(logged) / len(logged):.0f} kcal" if logged else "No meals in the last 7 days",
-            f"Known habits: {user.notes or 'none'}",
         ]
     )
     try:
@@ -1156,7 +1141,7 @@ async def refine_meal(
         # Refine what they currently see (portion applied) so a ½ tap isn't silently undone.
         previous = Estimate.model_validate_json(meal.estimate_json).scaled(meal.portion)
         est = await asyncio.wait_for(
-            _est(ctx).refine(previous, correction, media=media, notes=user.notes, original_text=meal.user_text or ""),
+            _est(ctx).refine(previous, correction, media=media, original_text=meal.user_text or ""),
             AI_DEADLINE_S,
         )
     except Exception as exc:
@@ -1199,7 +1184,6 @@ async def refine_meal(
         **_moved_to_yesterday(meal, est, user),
     )
     log.info("user=%s corrected meal %s: %s -> %s kcal", user.user_id, meal.id, round(old_kcal), round(est.kcal))
-    remembered = _remember(db, user, est.remember) if est.remember else ""
     # Retire the old card so only the newest version has buttons; replies to it still reach this meal.
     if meal.bot_message_id:
         db.link_message(user.user_id, meal.bot_message_id, meal.id)
@@ -1213,7 +1197,7 @@ async def refine_meal(
             pass
     meal = db.get_meal(meal.id, user.user_id)
     header = f"✅ Updated: {render.fmt_kcal(old_kcal)} → <b>{render.fmt_kcal(meal.kcal)} kcal</b>\n\n"
-    await _show_card(placeholder, lambda: header + _card(db, user, meal, est, remembered), meal)
+    await _show_card(placeholder, lambda: header + _card(db, user, meal, est), meal)
 
 
 # --- callbacks ---------------------------------------------------------------------
@@ -1514,26 +1498,6 @@ async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def cmd_notes(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = await _require_auth(update, ctx)
-    if not user:
-        return
-    if (ctx.args or [""])[0].lower() == "clear":
-        _db(ctx).set_user_field(user.user_id, "notes", "")
-        await update.message.reply_text("🧹 Cleared everything I'd learned about your habits.")
-        return
-    if not user.notes:
-        await update.message.reply_text(
-            "I haven't learned any habits yet. When you correct a meal (e.g. “I always ask for less rice”), "
-            "I'll remember it for next time."
-        )
-        return
-    await update.message.reply_text(
-        f"🧠 <b>What I remember about your eating habits</b>\n{escape(user.notes)}\n\n"
-        "Send <code>/notes clear</code> to forget all of these."
-    )
-
-
 async def cmd_export(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user = await _require_auth(update, ctx)
     if not user:
@@ -1601,7 +1565,6 @@ COMMANDS = [
     ("undo", "Delete the last meal"),
     ("goal", "Set your daily calorie goal"),
     ("reminder", "Evening recap time / off"),
-    ("notes", "Habits I've learned"),
     ("export", "Download your log as CSV"),
     ("help", "How to use this bot"),
 ]
@@ -1687,7 +1650,6 @@ def build_app(settings: Settings) -> Application:
     app.add_handler(CommandHandler("goal", cmd_goal, filters=private))
     app.add_handler(CommandHandler("reminder", cmd_reminder, filters=private))
     app.add_handler(CommandHandler("undo", cmd_undo, filters=private))
-    app.add_handler(CommandHandler("notes", cmd_notes, filters=private))
     app.add_handler(CommandHandler("export", cmd_export, filters=private))
     app.add_handler(CommandHandler("cancel", cmd_cancel, filters=private))
     app.add_handler(MessageHandler(private & (filters.PHOTO | filters.Document.IMAGE), on_photo))

@@ -51,14 +51,6 @@ class Estimate(BaseModel):
         "none", description="Only if the user explicitly says which meal this was; otherwise 'none'."
     )
     yesterday: bool = Field(False, description="True only if the user explicitly says they ate this yesterday.")
-    remember: str = Field(
-        "",
-        description=(
-            "Only when the user EXPLICITLY states a recurring habit with words like 'always', 'usually', "
-            "'never', 'I normally' (e.g. 'I always ask for less rice' -> 'Usually orders less rice'). "
-            "A one-off correction about this meal is NOT a habit. When in doubt, leave empty."
-        ),
-    )
     user_said: str = Field(
         "", description="For audio input only: a short transcription of what the user said. Otherwise empty."
     )
@@ -228,9 +220,9 @@ class Estimator:
         )
 
     async def estimate(
-        self, *, text: str = "", media: list[MediaPart] | None = None, notes: str = "", recent_meal: str = ""
+        self, *, text: str = "", media: list[MediaPart] | None = None, recent_meal: str = ""
     ) -> Estimate:
-        prompt = _notes_block(notes)
+        prompt = ""
         if recent_meal:
             prompt += (
                 f"The user's previous logged meal (a few minutes ago) was: {recent_meal}\n"
@@ -256,11 +248,10 @@ class Estimator:
         previous: Estimate,
         correction: str,
         media: list[MediaPart] | None = None,
-        notes: str = "",
         original_text: str = "",
     ) -> Estimate:
         original = f'When logging it, the user originally wrote: "{original_text}"\n' if original_text else ""
-        prompt = _notes_block(notes) + REFINE_PROMPT.format(
+        prompt = REFINE_PROMPT.format(
             previous=previous.model_dump_json(include=_ESTIMATE_CORE), correction=correction, original=original
         )
         est = await self._call([types.Part.from_text(text=prompt), *_media_parts(media)])
@@ -336,12 +327,6 @@ _ESTIMATE_CORE = {"kind", "title", "items", "note"}
 
 def _media_parts(media: list[MediaPart] | None) -> list[types.Part]:
     return [types.Part.from_bytes(data=m.data, mime_type=m.mime_type) for m in media or []]
-
-
-def _notes_block(notes: str) -> str:
-    if not notes.strip():
-        return ""
-    return f"Things to remember about this user's habits (apply when relevant):\n{notes.strip()}\n\n"
 
 
 def _finish_reason(resp: types.GenerateContentResponse) -> str:
